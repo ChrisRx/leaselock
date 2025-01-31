@@ -1,3 +1,6 @@
+// Package leaselock provides a distributed mutex using the Kubernetes Lease
+// API. It utilizes the Kubernetes leaderelection library, so has roughly the
+// same guarantees as provided by Kubernetes for coordinated leader election.
 package leaselock
 
 import (
@@ -27,48 +30,71 @@ func init() {
 
 type LeaseLockOption func(*LeaseLock)
 
+// WithName specifies the Kubernetes resource name for the lock.
 func WithName(name string) LeaseLockOption {
 	return func(l *LeaseLock) {
 		l.name = name
 	}
 }
 
+// WithNamespace specifies the Kubernetes namespace where the lock will be
+// created.
 func WithNamespace(ns string) LeaseLockOption {
 	return func(l *LeaseLock) {
 		l.namespace = ns
 	}
 }
 
+// WithID overrides the default random ID with a user-provided ID.
 func WithID(id string) LeaseLockOption {
 	return func(l *LeaseLock) {
 		l.id = id
 	}
 }
 
+// WithLeaseDuration specifies the lease duration for leader election. This
+// value defaults to 60s and will determine how long non-leader candidates for
+// a lock will wait before attempting to acquire leadership. Too small of a
+// value may cause issues with leader election, so recommended to keep this
+// above 10s.
 func WithLeaseDuration(d time.Duration) LeaseLockOption {
 	return func(l *LeaseLock) {
 		l.leaseDuration = d
 	}
 }
 
+// WithRenewDeadline specifies the duration a leader will retry refreshing
+// leadership before giving up. Defaults to 15s.
 func WithRenewDeadline(d time.Duration) LeaseLockOption {
 	return func(l *LeaseLock) {
 		l.renewDeadline = d
 	}
 }
 
+// WithRetryPeriod specifies the duration between client actions.
 func WithRetryPeriod(d time.Duration) LeaseLockOption {
 	return func(l *LeaseLock) {
 		l.retryPeriod = d
 	}
 }
 
+// WithClient allows passing in a Kubernetes client. By default, a client tries
+// to use an in-cluster configuration, followed by attempting to read a
+// kubeconfig from user configuration. This option is helpful in situations
+// like unit testing, where a real cluster isn't being used.
 func WithClient(client kubernetes.Interface) LeaseLockOption {
 	return func(l *LeaseLock) {
 		l.client = client
 	}
 }
 
+// LeaseLock represents a mutex coordinated through Kubernetes leases. The
+// leader election is provided by the Kubernetes leaderelection library, so
+// guarantees on correctness will be based on what is provided by that package.
+// In particular, it doesn't tolerate arbitrary clock skew rate so some of the
+// tunables, like renew deadline, are really important to dealing with
+// conditions in a cluster, such as high latency, that might cause leader
+// election to fail (i.e. multiple leaders, no leaders, etc).
 type LeaseLock struct {
 	name          string
 	namespace     string
@@ -192,11 +218,24 @@ type Options struct {
 	RetryPeriod   time.Duration
 }
 
+// Run establishes a LeaseLock and only runs the provided callback when the
+// participating client is elected leader. This should in most cases ensure
+// that only the leader will be running the callback, however, the guarantees
+// of this library are based on the guarantees of the Kubernetes leaderelection
+// library, so if a stronger guarantee is required to ensure business-logic is
+// executed only by one client at at a time, another distributed lock mechanism
+// should be used.
 func Run(ctx context.Context, fn func(context.Context, *LeaseLock) error, opts Options) error {
 	options := make([]LeaseLockOption, 0)
-	options = append(options, WithName(opts.Name))
-	options = append(options, WithNamespace(opts.Namespace))
-	options = append(options, WithID(opts.ID))
+	if opts.Name != "" {
+		options = append(options, WithName(opts.Name))
+	}
+	if opts.Namespace != "" {
+		options = append(options, WithNamespace(opts.Namespace))
+	}
+	if opts.ID != "" {
+		options = append(options, WithID(opts.ID))
+	}
 	if opts.LeaseDuration != 0 {
 		options = append(options, WithLeaseDuration(opts.LeaseDuration))
 	}
@@ -214,5 +253,8 @@ func Run(ctx context.Context, fn func(context.Context, *LeaseLock) error, opts O
 	l.Lock()
 	defer l.Unlock()
 
+	// TODO(chrism): maybe log when this is finished so it is clear if the
+	// callback function exited (vs. that it lost leadership for some reason so
+	// all we get is the clean up message)
 	return fn(ctx, l)
 }
